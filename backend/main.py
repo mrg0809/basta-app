@@ -6,6 +6,8 @@ from supabase import Client
 import supabase_client
 from supabase_client import get_supabase_client
 
+from routers import game_config_router
+
 app = FastAPI(
     title="Basta App API",
     description="API para el juego de BASTA multijugador.",
@@ -30,6 +32,8 @@ app.add_middleware(
     allow_methods=["*"],    # Permite todos los métodos (GET, POST, etc.)
     allow_headers=["*"],    # Permite todos los headers
 )
+
+app.include_router(game_config_router.router, prefix="/api/v1")
 
 @app.get("/")
 async def root():

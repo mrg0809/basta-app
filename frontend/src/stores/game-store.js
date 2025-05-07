@@ -1,19 +1,17 @@
 // src/stores/game-store.js
 import { defineStore } from 'pinia';
 import { Notify } from 'quasar';
+import { api } from 'boot/axios'; 
 
 export const useGameStore = defineStore('game', {
   state: () => ({
-    gameTitle: 'BASTA Futbolera',
-    gameFields: [
-      { id: 'playerName', label: 'Nombre Jugador' },
-      { id: 'stadiumName', label: 'Nombre Estadio' },
-      { id: 'team', label: 'Equipo' },
-      { id: 'nationalTeam', label: 'Selección' },
-      { id: 'coach', label: 'Director Técnico' },
-      { id: 'playerNickname', label: 'Apodo Jugador' },
-      { id: 'thing', label: 'Cosa (fútbol)' },
-    ],
+    // gameTitle: 'BASTA Futbolera', // Lo podemos generar dinámicamente o quitar
+    // gameFields: [...], // Esto será reemplazado por currentCategories
+
+    themes: [], // Para almacenar las temáticas cargadas del backend
+    selectedTheme: null, // Para almacenar la temática seleccionada (objeto completo)
+    currentCategories: [], // Para las categorías de la temática seleccionada
+
     answers: {},
     scores: {},
     currentLetter: '',
@@ -23,26 +21,93 @@ export const useGameStore = defineStore('game', {
   }),
 
   getters: {
+    gameTitle: (state) => {
+      return state.selectedTheme ? `BASTA - ${state.selectedTheme.name}` : 'BASTA';
+    },
     totalScore: (state) => {
       return Object.values(state.scores).reduce((sum, score) => sum + (score || 0), 0);
     },
     initialAnswers: (state) => {
       const initial = {};
-      state.gameFields.forEach(field => {
-        initial[field.id] = '';
+      // Ahora se basa en currentCategories
+      state.currentCategories.forEach(category => {
+        initial[category.id] = ''; // Usaremos category.id como key para las respuestas
       });
       return initial;
+    },
+    // Un getter para saber si el juego está listo para empezar (temática y categorías cargadas)
+    isGameSetupComplete: (state) => {
+      return state.selectedTheme && state.currentCategories.length > 0;
     }
   },
 
   actions: {
     initializeGameState() {
-      this.answers = { ...this.initialAnswers };
+      this.answers = { ...this.initialAnswers }; // Usar el getter
       this.scores = {};
       this.currentLetter = '';
       this.gameInProgress = false;
       this.gameFinished = false;
+      // No reseteamos themes, selectedTheme, o currentCategories aquí,
+      // ya que son parte de la configuración del juego, no del estado de una ronda.
     },
+
+    // --- NUEVAS ACCIONES ---
+    async fetchThemes() {
+      try {
+        const response = await api.get('/themes/'); // Usa la instancia 'api'
+        this.themes = response.data;
+        if (this.themes.length > 0) {
+          // Opcional: seleccionar la primera temática por defecto
+          // this.selectTheme(this.themes[0].id);
+        }
+        Notify.create({ message: 'Temáticas cargadas', color: 'positive', icon: 'style' });
+      } catch (error) {
+        console.error('Error fetching themes:', error);
+        Notify.create({
+          message: `Error al cargar temáticas: ${error.response?.data?.detail || error.message}`,
+          color: 'negative',
+          icon: 'error_outline'
+        });
+        this.themes = []; // Asegurar que themes sea un array vacío en caso de error
+      }
+    },
+
+    async selectTheme(themeId) {
+      if (!themeId) {
+        this.selectedTheme = null;
+        this.currentCategories = [];
+        this.initializeGameState(); // Resetea respuestas si no hay temática
+        return;
+      }
+      const theme = this.themes.find(t => t.id === themeId);
+      if (theme) {
+        this.selectedTheme = theme;
+        await this.fetchCategoriesForTheme(themeId);
+        this.initializeGameState(); // Resetea el estado del juego para la nueva temática
+      }
+    },
+
+    async fetchCategoriesForTheme(themeId) {
+      if (!themeId) {
+        this.currentCategories = [];
+        return;
+      }
+      try {
+        // El endpoint es /categories/?theme_id=<uuid>
+        const response = await api.get(`/categories/?theme_id=${themeId}`);
+        this.currentCategories = response.data;
+        Notify.create({ message: `Categorías para '${this.selectedTheme?.name}' cargadas.`, color: 'info' });
+      } catch (error) {
+        console.error('Error fetching categories:', error);
+        Notify.create({
+          message: `Error al cargar categorías: ${error.response?.data?.detail || error.message}`,
+          color: 'negative'
+        });
+        this.currentCategories = []; // Asegurar que categories sea un array vacío en caso de error
+      }
+    },
+    // --- FIN NUEVAS ACCIONES ---
 
     getRandomLetter() {
       const randomIndex = Math.floor(Math.random() * this.alphabet.length);
@@ -50,40 +115,43 @@ export const useGameStore = defineStore('game', {
     },
 
     startGame() {
-      this.initializeGameState();
+      if (!this.isGameSetupComplete) {
+        Notify.create({ message: 'Por favor, selecciona una temática primero.', color: 'warning' });
+        return;
+      }
+      this.initializeGameState(); // Asegura que answers y scores estén limpios para las currentCategories
       this.currentLetter = this.getRandomLetter();
       this.gameInProgress = true;
       Notify.create({
-        message: `¡El juego ha comenzado! Letra: ${this.currentLetter}`,
+        message: `¡Juego iniciado! Letra: ${this.currentLetter} | Temática: ${this.selectedTheme.name}`,
         color: 'positive',
         icon: 'play_arrow'
       });
     },
 
-    // Acción para actualizar una respuesta específica
-    updateAnswer({ fieldId, value }) {
-      // Corrección aquí:
-      if (Object.prototype.hasOwnProperty.call(this.answers, fieldId)) {
-        this.answers[fieldId] = value;
+    updateAnswer({ categoryId, value }) { // Ahora usamos categoryId
+      if (Object.prototype.hasOwnProperty.call(this.answers, categoryId)) {
+        this.answers[categoryId] = value;
+      } else {
+        // Opcional: si la categoryId no existe en answers (lo que no debería pasar
+        // si initialAnswers se genera correctamente), podrías querer añadirla o loguear un warning.
+        // Por ahora, simplemente la ignoramos si no existe, pero lo ideal es que siempre exista.
+        // console.warn(`Category ID ${categoryId} not found in answers object. InitialAnswers might be incorrect.`);
+        // O, si quieres que siempre se cree si no existe (aunque esto puede ocultar problemas en initialAnswers):
+        this.answers[categoryId] = value;
       }
-      // Alternativamente, si sabes que this.answers es un objeto simple
-      // y no te preocupan las propiedades del prototipo, podrías usar:
-      // if (fieldId in this.answers) {
-      //   this.answers[fieldId] = value;
-      // }
-      // Pero `Object.prototype.hasOwnProperty.call` es la forma más segura y la que ESLint prefiere.
     },
 
     calculateScores() {
       let tempScores = {};
-      this.gameFields.forEach(field => {
-        const answer = this.answers[field.id]?.trim() || '';
+      this.currentCategories.forEach(category => {
+        const answer = this.answers[category.id]?.trim() || '';
         if (answer && answer.toUpperCase().startsWith(this.currentLetter)) {
-          tempScores[field.id] = 100;
+          tempScores[category.id] = 100;
         } else if (answer) {
-          tempScores[field.id] = 0;
+          tempScores[category.id] = 0;
         } else {
-          tempScores[field.id] = 0;
+          tempScores[category.id] = 0;
         }
       });
       this.scores = tempScores;
@@ -101,10 +169,12 @@ export const useGameStore = defineStore('game', {
       });
     },
 
-    resetGame() {
-      this.initializeGameState();
+    resetGame() { // Ahora resetea manteniendo la temática seleccionada
+      this.initializeGameState(); // Limpia respuestas, scores, letra, estado de juego
+      // this.selectedTheme = null; // Opcional: si quieres que se deseleccione la temática
+      // this.currentCategories = [];
       Notify.create({
-        message: 'Nuevo juego listo.',
+        message: 'Nuevo juego listo con la misma temática.',
         color: 'secondary',
         icon: 'refresh'
       });

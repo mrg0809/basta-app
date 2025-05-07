@@ -6,7 +6,7 @@ import axios from 'axios'
 // const api = axios.create({ baseURL: 'http://localhost:8000/api/v1' })
 // Por ahora, solo crearemos una instancia simple. La configuraremos más adelante.
 const api = axios.create({
-  // baseURL: 'http://localhost:8000' // Descomenta y ajusta cuando tengas tu backend FastAPI
+   baseURL: 'http://localhost:8000/api/v1' 
 });
 
 export default ({ app }) => {
