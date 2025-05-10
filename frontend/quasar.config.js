@@ -14,6 +14,7 @@ export default defineConfig((/* ctx */) => {
     boot: [
       'pinia',
       'axios',
+      'supabase-client',
     ],
 
     // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file#css
@@ -92,7 +93,10 @@ export default defineConfig((/* ctx */) => {
       // directives: [],
 
       // Quasar plugins
-      plugins: []
+      plugins: [
+        'Notify',
+        'Loading',
+      ]
     },
 
     // animations: 'all', // --- includes all animations

@@ -13,11 +13,6 @@ app = FastAPI(
     description="API para el juego de BASTA multijugador.",
     version="0.1.0"
 )
-
-# Configuración de CORS
-# Orígenes permitidos (tu frontend Quasar)
-# En desarrollo, Quasar corre por defecto en localhost:9000 o el puerto que hayas configurado.
-# Para producción, deberás añadir el dominio de tu frontend.
 origins = [
     "http://localhost",         # Si accedes sin puerto especificado
     "http://localhost:9000",    # Puerto por defecto de Quasar dev
