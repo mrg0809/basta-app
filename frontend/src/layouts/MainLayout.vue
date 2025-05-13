@@ -12,28 +12,34 @@
         />
 
         <q-toolbar-title>
-          Basta App ({{ authStore.isAuthenticated ? (authStore.userName || authStore.userEmail) : 'Invitado' }})
+          Basta App ({{ authStore.isAuthenticated && authStore.initialCheckDone ? (authStore.userName || authStore.userEmail) : 'Invitado' }})
         </q-toolbar-title>
 
-        <div>
+        <div class="q-gutter-sm row items-center no-wrap">
+          <template v-if="authStore.isAuthenticated && authStore.initialCheckDone">
+            <q-btn flat dense label="Crear Sala" :to="{ name: 'CreateRoom' }" icon="add_circle_outline" />
+            <q-btn flat dense label="Unirse a Sala" :to="{ name: 'JoinRoom' }" icon="meeting_room" />
+            <q-btn
+              flat dense
+              label="Cerrar Sesión"
+              @click="handleSignOut"
+              icon="logout"
+              :loading="authStore.loading && !authStore.initialCheckDone" 
+              :disable="authStore.loading && !authStore.initialCheckDone"
+            />
+          </template>
+          
           <q-btn
             v-if="!authStore.isAuthenticated && authStore.initialCheckDone" flat
             label="Iniciar Sesión con Google"
             @click="handleSignInWithGoogle"
             icon="login"
-            :loading="authStore.loading"
-            :disable="authStore.loading"
+            :loading="authStore.loading && !authStore.initialCheckDone"
+            :disable="authStore.loading && !authStore.initialCheckDone"
           />
-          <q-btn
-            v-if="authStore.isAuthenticated && authStore.initialCheckDone" flat
-            label="Cerrar Sesión"
-            @click="handleSignOut"
-            icon="logout"
-            :loading="authStore.loading"
-            :disable="authStore.loading"
-          />
-          <div v-if="!authStore.initialCheckDone || authStore.loading" class="q-mx-sm">
-              <q-spinner size="xs" />
+
+          <div v-if="!authStore.initialCheckDone || authStore.loading" class="q-mx-sm row items-center no-wrap">
+              <q-spinner size="1.5em" class="q-mr-xs" />
           </div>
         </div>
       </q-toolbar>
@@ -46,13 +52,29 @@
     >
       <q-list>
         <q-item-label header>
-          Menú
+          Menú Principal
         </q-item-label>
-        <q-item clickable to="/" exact>
-          <q-item-section avatar><q-icon name="home" /></q-item-section>
-          <q-item-section><q-item-label>Inicio (Juego)</q-item-label></q-item-section>
+        
+        <q-item clickable :to="{ name: 'GamePage' }" exact>
+          <q-item-section avatar><q-icon name="sports_esports" /></q-item-section>
+          <q-item-section><q-item-label>Juego BASTA</q-item-label></q-item-section>
         </q-item>
-        </q-list>
+
+        <template v-if="authStore.isAuthenticated && authStore.initialCheckDone">
+          <q-separator class="q-my-md" />
+          <q-item-label header>Salas de Juego</q-item-label>
+          
+          <q-item clickable :to="{ name: 'CreateRoom' }">
+            <q-item-section avatar><q-icon name="add_circle" /></q-item-section>
+            <q-item-section><q-item-label>Crear Nueva Sala</q-item-label></q-item-section>
+          </q-item>
+          
+          <q-item clickable :to="{ name: 'JoinRoom' }">
+            <q-item-section avatar><q-icon name="group_add" /></q-item-section>
+            <q-item-section><q-item-label>Unirse a Sala Existente</q-item-label></q-item-section>
+          </q-item>
+        </template>
+      </q-list>
     </q-drawer>
 
     <q-page-container>
@@ -65,9 +87,11 @@
 import { ref } from 'vue';
 import { useAuthStore } from 'stores/auth-store';
 import { useQuasar } from 'quasar';
+import { useRouter } from 'vue-router';
 
-const $q = useQuasar();
+const $q = useQuasar(); // $q se usa ahora
 const authStore = useAuthStore();
+const router = useRouter();
 const leftDrawerOpen = ref(false);
 
 const toggleLeftDrawer = () => {
@@ -75,21 +99,26 @@ const toggleLeftDrawer = () => {
 };
 
 const handleSignInWithGoogle = async () => {
-  if (authStore.isAuthenticated) { // Doble chequeo
-    $q.notify.create({ message: 'Ya has iniciado sesión.', color: 'info' });
+  // Esta guarda es útil para dar feedback inmediato en la UI si el botón
+  // se clickea cuando ya está autenticado (aunque el v-if debería prevenirlo
+  // una vez que el estado initialCheckDone es true).
+  if (authStore.isAuthenticated && authStore.initialCheckDone) {
+    $q.notify({ // <--- RESTAURAMOS EL USO DE $q.notify
+      message: 'Ya has iniciado sesión.',
+      color: 'info',
+      icon: 'info_outline' // Un ícono apropiado
+    });
     return;
   }
-  await authStore.signInWithGoogle();
-  // La redirección a Google ocurre dentro de la acción del store.
-  // onAuthStateChange manejará la actualización del estado cuando el usuario regrese.
+  // Solo llama a la acción del store si no estamos ya autenticados
+  // (la acción del store también tiene una guarda, pero esta es para el feedback de UI)
+  if (!authStore.isAuthenticated) {
+    await authStore.signInWithGoogle();
+  }
 };
 
 const handleSignOut = async () => {
   await authStore.signOut();
-  // onAuthStateChange manejará la actualización del estado.
-  // Podrías redirigir aquí si es necesario, ej. a una página de inicio pública.
-  // import { useRouter } from 'vue-router';
-  // const router = useRouter();
-  // router.push('/');
+  router.replace('/');
 };
 </script>
