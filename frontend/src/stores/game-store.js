@@ -11,6 +11,9 @@ export const useGameStore = defineStore('game', {
     themes: [], // Para almacenar las temáticas cargadas del backend
     selectedTheme: null, // Para almacenar la temática seleccionada (objeto completo)
     currentCategories: [], // Para las categorías de la temática seleccionada
+    currentThemeForRoom: null,
+    isLoadingThemes: false,
+    isLoadingCategories: false,
 
     answers: {},
     scores: {},
@@ -22,7 +25,8 @@ export const useGameStore = defineStore('game', {
 
   getters: {
     gameTitle: (state) => {
-      return state.selectedTheme ? `BASTA - ${state.selectedTheme.name}` : 'BASTA';
+      return state.selectedTheme ? `BASTA - ${state.selectedTheme.name}` : 
+             state.currentThemeForRoom ? `BASTA - ${state.currentThemeForRoom.name}` : 'BASTA';
     },
     totalScore: (state) => {
       return Object.values(state.scores).reduce((sum, score) => sum + (score || 0), 0);
@@ -36,8 +40,11 @@ export const useGameStore = defineStore('game', {
       return initial;
     },
     // Un getter para saber si el juego está listo para empezar (temática y categorías cargadas)
-    isGameSetupComplete: (state) => {
-      return state.selectedTheme && state.currentCategories.length > 0;
+    isGameSetupCompleteForRoom: (state) => {
+      // Usado por GamePage.vue para saber si puede renderizar el juego
+      return state.currentThemeForRoom && 
+             state.currentCategories.length > 0 &&
+             state.currentThemeForRoom.id === state.currentCategories[0]?.theme_id; // Una verificación extra
     }
   },
 
@@ -54,6 +61,7 @@ export const useGameStore = defineStore('game', {
 
     // --- NUEVAS ACCIONES ---
     async fetchThemes() {
+      this.isLoadingThemes = true;
       try {
         const response = await api.get('/themes/'); // Usa la instancia 'api'
         this.themes = response.data;
@@ -70,6 +78,9 @@ export const useGameStore = defineStore('game', {
           icon: 'error_outline'
         });
         this.themes = []; // Asegurar que themes sea un array vacío en caso de error
+      }
+      finally {
+        this.isLoadingThemes = false;
       }
     },
 
@@ -93,6 +104,7 @@ export const useGameStore = defineStore('game', {
         this.currentCategories = [];
         return;
       }
+      this.isLoadingCategories = true;
       try {
         // El endpoint es /categories/?theme_id=<uuid>
         const response = await api.get(`/categories/?theme_id=${themeId}`);
@@ -105,6 +117,9 @@ export const useGameStore = defineStore('game', {
           color: 'negative'
         });
         this.currentCategories = []; // Asegurar que categories sea un array vacío en caso de error
+      }
+      finally {
+        this.isLoadingCategories = false;
       }
     },
     // --- FIN NUEVAS ACCIONES ---

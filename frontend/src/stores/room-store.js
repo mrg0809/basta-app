@@ -185,6 +185,35 @@ export const useRoomStore = defineStore('room', {
         }
       },
 
+      _updateCurrentRoomDetails(updatedDetails) {
+        if (this.currentRoom && updatedDetails) {
+          // Fusionar solo los campos que pertenecen a game_rooms
+          // para no afectar room_participants que se maneja por su propio canal Realtime
+          const roomSpecificFields = [
+            'status', 'current_letter', 'current_round_number', 
+            'current_round_basta_caller_id', 'current_round_basta_called_at',
+            'host_user_id', 'theme_id', 'max_players', 'room_code' // Incluir otros campos de game_rooms
+          ];
+          let changed = false;
+          for (const field of roomSpecificFields) {
+            if (Object.prototype.hasOwnProperty.call(updatedDetails, field) && this.currentRoom[field] !== updatedDetails[field]) {
+              this.currentRoom[field] = updatedDetails[field];
+              changed = true;
+            }
+          }
+          // Si el payload.new también incluye 'id' y 'created_at', y son diferentes, también actualízalos.
+          if (updatedDetails.id && this.currentRoom.id !== updatedDetails.id) this.currentRoom.id = updatedDetails.id;
+    
+          if (changed) {
+            console.log('RoomStore: currentRoom details updated by Realtime (game_rooms event)', JSON.parse(JSON.stringify(this.currentRoom)));
+          }
+        } else if (!this.currentRoom && updatedDetails) {
+            // Si no había sala actual, pero llega un update (raro en este contexto de GamePage si ya se validó)
+            console.warn("RoomStore: _updateCurrentRoomDetails called but no currentRoom, attempting to set with:", updatedDetails)
+            // this._setRoom(updatedDetails); // Podrías llamar a _setRoom si es apropiado
+        }
+      },
+
       async setMyReadyStatus(isReady) {
         if (!this.currentRoom || !this.currentRoom.id) {
           console.error("RoomStore: No current room to set ready status for.");
@@ -302,7 +331,44 @@ export const useRoomStore = defineStore('room', {
         } finally {
             this.isLoadingRoom = false;
         }
-    }
-    
+    },
+
+    async playerSaysBasta(answers) {
+      if (!this.currentRoom || !this.currentRoom.id) {
+        this.roomError = "No estás en una sala activa para decir BASTA.";
+        // Notify.create({ type: 'negative', message: this.roomError }); // Comentado
+        console.error(this.roomError);
+        return false;
+      }
+      if (this.currentRoom.status !== 'in_progress') {
+        this.roomError = "El juego no ha comenzado o ya terminó en esta sala.";
+        // Notify.create({ type: 'negative', message: this.roomError }); // Comentado
+        console.error(this.roomError);
+        return false;
+      }
+  
+      this.isLoadingRoom = true; // Podrías usar un flag específico como isSubmittingBasta
+      this.roomError = null;
+      try {
+        const payload = { answers: answers }; // 'answers' es un objeto { category_id: "respuesta", ... }
+        console.log(`RoomStore: Player says BASTA for room ${this.currentRoom.id}. Payload:`, payload);
+        
+        const response = await api.post(`/rooms/${this.currentRoom.id}/rounds/basta`, payload);
+        
+        console.log('RoomStore: BASTA request successful. Backend response:', response.data);
+        // Aquí podrías actualizar algún estado local, ej. "yaDijeBastaEnEstaRonda = true"
+        // Notify.create({ type: 'info', message: response.data.message || '¡BASTA! Esperando a los demás.' }); // Comentado
+        return true;
+      } catch (error) {
+        console.error("Error sending BASTA:", error.response?.data || error.message);
+        this.roomError = error.response?.data?.detail || 'Error al procesar BASTA.';
+        // Notify.create({ type: 'negative', message: this.roomError }); // Comentado
+        return false;
+      } finally {
+        this.isLoadingRoom = false; // O el flag específico
+      }
+    },
   },
+
+
 });

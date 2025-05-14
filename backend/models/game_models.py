@@ -1,6 +1,6 @@
 # backend/models/game_models.py
 from pydantic import BaseModel, Field 
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict
 from uuid import UUID
 from datetime import datetime
 
@@ -88,3 +88,6 @@ class JoinRoomPayload(BaseModel):
 
 class SetReadyPayload(BaseModel):
     is_ready: bool
+
+class PlayerAnswers(BaseModel):
+    answers: Dict[str, Optional[str]]
