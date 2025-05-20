@@ -70,8 +70,74 @@
         </q-chip>
       </div>
       
-      <div v-if="showingRoundResults">
+      <div v-if="showingRoundResults && roomStore.currentRoundResults" class="q-mt-lg">
+        <q-card>
+          <q-card-section class="bg-secondary text-white">
+            <div class="text-h6">Resultados de la Ronda {{ roomStore.currentRoundResults.round_number }} - Letra: {{ roomStore.currentRoundResults.current_letter }}</div>
+          </q-card-section>
+          <q-markup-table flat bordered wrap-cells>
+            <thead>
+              <tr>
+                <th class="text-left">Jugador</th>
+                <th v-for="category in roomStore.currentRoundResults.categories" :key="category.id" class="text-left">
+                  {{ category.name }}
+                </th>
+                <th class="text-right">Total Ronda</th>
+                <th class="text-right">Total Acumulado</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="pResult in roomStore.currentRoundResults.results_by_participant" :key="pResult.participant_id">
+                <td class="text-left">
+                  <q-chip :label="pResult.nickname" dense size="sm" :color="pResult.user_id === authStore.userId ? 'orange' : 'grey-7'" text-color="white" />
+                </td>
+                <td v-for="category in roomStore.currentRoundResults.categories" :key="category.id" class="text-left">
+                  <div v-if="pResult.answers[category.id]">
+                    <div>{{ pResult.answers[category.id].text || '-' }}</div>
+                    <q-chip dense size="xs" 
+                      :color="pResult.answers[category.id].score === 100 ? 'positive' : (pResult.answers[category.id].score === 50 ? 'warning' : (pResult.answers[category.id].score === 0 && pResult.answers[category.id].is_valid === false ? 'negative' : 'grey'))" 
+                      text-color="white">
+                      {{ pResult.answers[category.id].score }} pts
+                      <q-tooltip v-if="pResult.answers[category.id].notes" content-style="font-size: 12px">
+                        {{ pResult.answers[category.id].notes }}
+                      </q-tooltip>
+                    </q-chip>
+                  </div>
+                  <div v-else>- (0 pts)</div>
+                </td>
+                <td class="text-right text-weight-bold">{{ pResult.round_score }}</td>
+                <td class="text-right text-weight-bold">{{ pResult.total_score }}</td>
+              </tr>
+            </tbody>
+          </q-markup-table>
+
+          <q-card-actions align="right" class="q-mt-md" v-if="roomStore.currentRoom?.status === 'round_over_results'">
+            <div v-if="isHostOfThisGame">
+              <q-btn 
+                v-if="roomStore.currentRoom.current_round_number < MAX_ROUNDS_FOR_GAME"
+                label="Iniciar Siguiente Ronda" 
+                color="primary"
+                @click="handleNextRound"
+                :loading="roomStore.isLoadingRoom"
+              />
+              <q-btn 
+                v-else 
+                label="Ver Puntajes Finales" 
+                color="positive" 
+                @click="handleShowFinalScores" />
+            </div>
+            <div v-else>
+              Esperando que el host inicie la siguiente ronda...
+            </div>
+          </q-card-actions>
+
+          <div v-if="roomStore.currentRoom?.status === 'finished'" class="q-mt-lg text-center">
+              <div class="text-h5">¡Juego Terminado!</div>
+              <q-btn label="Volver al Inicio" color="primary" to="/" class="q-mt-md"/>
           </div>
+
+        </q-card>
+      </div>
 
     </div>
   </q-page>
@@ -102,12 +168,38 @@ const showingRoundResults = ref(false);
 const countdownSeconds = ref(0);
 const countdownInterval = ref(null);
 const bastaCallerNickname = ref('');
+const lastProcessedRoundNumber = ref(0)
 
 let gameRoomUpdateChannel = null;
 
 // COMPUTEDS que SÍ se usan o podrían usarse internamente o en el template
 const currentRoomDetails = computed(() => roomStore.currentRoom);
-const currentAuthUserId = computed(() => authStore.userId);
+const currentAuthUserId = computed(() => {
+  // Log para ver cuándo se recalcula esta computed y qué valor tiene user.id
+  console.log('Computed currentAuthUserId: authStore.user?.id =', authStore.user?.id);
+  return authStore.user?.id || null;
+});
+
+const isHostOfThisGame = computed(() => {
+  const authId = currentAuthUserId.value; // ID del usuario logueado
+  const hostIdInRoom = currentRoomDetails.value?.host_user_id; // ID del host de la sala actual
+
+  // Logs para depuración:
+  console.log('Computed isHostOfThisGame: Verificando...');
+  console.log(`  - Auth User ID (currentAuthUserId.value): ${authId}`);
+  console.log(`  - Room's Host ID (currentRoomDetails.value?.host_user_id): ${hostIdInRoom}`);
+  
+  if (!currentRoomDetails.value || !authId) {
+    console.log('  - Pre-condiciones NO cumplidas (no hay sala actual o no hay ID de usuario autenticado). Devuelve: false');
+    return false;
+  }
+  
+  const decision = hostIdInRoom === authId;
+  console.log(`  - Comparación: '${hostIdInRoom}' === '${authId}'  Resultado: ${decision}`);
+  return decision;
+});
+
+const MAX_ROUNDS_FOR_GAME = 3;
 
 // FUNCIONES
 const clearBastaCountdown = () => {
@@ -213,6 +305,30 @@ const cleanupGameRoomRealtimeSubscription = () => {
   }
 };
 
+const handleNextRound = async () => {
+  await roomStore.goToNextRound();
+};
+
+const handleShowFinalScores = () => {
+  // Si los resultados ya se muestran, esto podría no hacer nada nuevo,
+  // o podrías navegar a una página de "Game Over" más elaborada.
+  $q.notify('Mostrando puntajes finales (ya visibles o lógica pendiente).');
+  // Podrías querer asegurar que showingRoundResults.value = true aquí.
+  if (roomStore.currentRoundResults) {
+      showingRoundResults.value = true;
+  }
+};
+
+const resetForNewRound = () => {
+  console.log("GamePage: Reseteando para nueva ronda.");
+  initializeAnswers(); // Limpia las respuestas
+  gameIsOverForPlayer.value = false;
+  isSubmittingBasta.value = false;
+  showingRoundResults.value = false; // Ocultar tabla de resultados
+  clearBastaCountdown(); // Limpiar cualquier conteo
+  pageError.value = null; // Limpiar errores de página
+};
+
 onMounted(async () => {
   isLoadingPageData.value = true;
   pageError.value = null;
@@ -260,14 +376,15 @@ onUnmounted(() => {
   cleanupGameRoomRealtimeSubscription();
 });
 
-watch(currentRoomDetails, (newRoomState, oldRoomState) => {
-  const myId = currentAuthUserId.value; // Usar la computed para el ID del usuario actual
+watch(currentRoomDetails, async (newRoomState, oldRoomState) => {
+  const myId = currentAuthUserId.value;
   const myIdForLog = myId || 'NO_AUTH_ID_YET';
 
   if (!newRoomState) {
-    console.log(`GamePage Watcher (MyID: ${myIdForLog}): currentRoom es null. Limpiando conteo.`);
-    clearBastaCountdown();
-    if (oldRoomState) { // Solo redirigir si antes había una sala y ahora no
+    console.log(`GamePage Watcher (MyID: ${myIdForLog}): currentRoom es null. Limpiando todo y reseteando ronda procesada.`);
+    resetForNewRound();
+    lastProcessedRoundNumber.value = 0; // Resetear al salir de la sala
+    if (oldRoomState) {
       console.log(`GamePage Watcher (MyID: ${myIdForLog}): Redirigiendo a / porque currentRoom se volvió null.`);
       router.replace('/');
     }
@@ -275,66 +392,93 @@ watch(currentRoomDetails, (newRoomState, oldRoomState) => {
   }
 
   console.log(`GamePage Watcher (MyID: ${myIdForLog}): roomStore.currentRoom cambió.`);
-  console.log(`  New State Details: status: ${newRoomState.status}, basta_caller_id: ${newRoomState.current_round_basta_caller_id}, basta_called_at: ${newRoomState.current_round_basta_called_at}, my gameIsOverForPlayer: ${gameIsOverForPlayer.value}`);
+  console.log(`  New State: status=${newRoomState.status}, round=${newRoomState.current_round_number}, letter=${newRoomState.current_letter}, basta_caller=${newRoomState.current_round_basta_caller_id}, my gameIsOverForPlayer=${gameIsOverForPlayer.value}, lastProcessedRound=${lastProcessedRoundNumber.value}`);
+  if (oldRoomState) {
+    console.log(`  Old State: status=${oldRoomState.status}, round=${oldRoomState.current_round_number}`);
+  }
 
-  // --- Lógica para reaccionar al estado 'scoring' ---
-  if (newRoomState.status === 'scoring') {
-    console.log(`GamePage Watcher (MyID: ${myIdForLog}): Room status es AHORA 'scoring'. Preparando para resultados.`);
-    gameIsOverForPlayer.value = true; // Asegurar que todos los inputs estén bloqueados
-    clearBastaCountdown(); // Limpiar cualquier conteo residual
-    showingRoundResults.value = false; // O true si vas a mostrar "Calculando..."
-                                      // El template ya tiene una sección para esto:
-                                      // <div v-if="gameIsOverForPlayer && !showingRoundResults" ...>
-                                      //   <div v-if="roomStore.currentRoom?.status === 'scoring'">
-                                      //     Calculando puntajes...
-                                      //   </div>
-                                      // </div>
-    // Aquí es donde más adelante llamarías a una acción para obtener los resultados de la ronda.
+  // --- MANEJO DE ESTADOS DE LA SALA ---
+  if (newRoomState.status === 'finished') {
+    console.log(`GamePage Watcher (MyID: ${myIdForLog}): Room status es 'finished'. Juego terminado.`);
+    gameIsOverForPlayer.value = true;
+    clearBastaCountdown();
+    lastProcessedRoundNumber.value = newRoomState.current_round_number; // Marcar como procesada
   } 
-  // --- Lógica para reaccionar al estado 'in_progress' (para el BASTA y conteo) ---
+  else if (newRoomState.status === 'round_over_results') {
+    console.log(`GamePage Watcher (MyID: ${myIdForLog}): Room status es 'round_over_results'. Fetching results.`);
+    gameIsOverForPlayer.value = true; // Los inputs deben estar bloqueados
+    clearBastaCountdown();
+    showingRoundResults.value = false; 
+    
+    await roomStore.fetchRoundResults();
+
+    if (roomStore.currentRoundResults) {
+      showingRoundResults.value = true;
+      console.log(`GamePage Watcher (MyID: ${myIdForLog}): Resultados de ronda cargados.`);
+    } else {
+      pageError.value = roomStore.roomError || "No se pudieron cargar los resultados de la ronda.";
+      console.error(`GamePage Watcher (MyID: ${myIdForLog}): Error al cargar resultados - ${pageError.value}`);
+    }
+    lastProcessedRoundNumber.value = newRoomState.current_round_number; // Marcar esta ronda como vista en sus resultados
+  } 
+  else if (newRoomState.status === 'scoring') {
+    console.log(`GamePage Watcher (MyID: ${myIdForLog}): Room status es 'scoring'.`);
+    gameIsOverForPlayer.value = true; // Los inputs siguen bloqueados
+    clearBastaCountdown();
+    showingRoundResults.value = false;
+    // No actualizamos lastProcessedRoundNumber aquí, esperamos a 'round_over_results'
+  } 
   else if (newRoomState.status === 'in_progress') {
+    console.log(`GamePage Watcher (MyID: ${myIdForLog}): Room status es 'in_progress'.`);
+    
+    // --- DETECCIÓN DE NUEVA RONDA USANDO lastProcessedRoundNumber ---
+    const isNewRoundDetected = newRoomState.current_round_number > lastProcessedRoundNumber.value &&
+                               !newRoomState.current_round_basta_caller_id;
+
+    if (isNewRoundDetected) {
+      console.log(`GamePage Watcher (MyID: ${myIdForLog}): DETECTADA NUEVA RONDA ${newRoomState.current_round_number} (UI estaba en ${lastProcessedRoundNumber.value}). Reseteando UI.`);
+      resetForNewRound();
+      lastProcessedRoundNumber.value = newRoomState.current_round_number; // Actualizar la última ronda que la UI está configurando/jugando
+    }
+    // -----------------------------------------------------------------
+
+    // Lógica para el conteo de BASTA (si alguien ya cantó en ESTA ronda 'in_progress')
+    // Esta se ejecuta después del posible reseteo si es una nueva ronda.
+    // Si fue una nueva ronda, gameIsOverForPlayer.value será false aquí.
     if (newRoomState.current_round_basta_caller_id && newRoomState.current_round_basta_called_at) {
-      // Alguien ha cantado BASTA
       const callerId = newRoomState.current_round_basta_caller_id;
       const amICaller = myId === callerId;
       
       console.log(`  BASTA DETECTADO por watcher: CallerID: ${callerId}, MyID: ${myId}, AmICaller: ${amICaller}, GameIsOverForMe(antes de decisión): ${gameIsOverForPlayer.value}`);
 
       if (!amICaller && !gameIsOverForPlayer.value) {
-        // Este es otro jugador, y yo no he dicho BASTA todavía
-        console.log("  DECISIÓN DEL WATCHER: Iniciar conteo para mí (no soy el caller y mi juego no ha terminado).");
+        console.log("  DECISIÓN DEL WATCHER (BASTA): Iniciar conteo para mí (no soy el caller y mi juego no ha terminado).");
         const participantWhoCalledBasta = roomStore.participants.find(p => p.user_id === callerId);
         bastaCallerNickname.value = participantWhoCalledBasta ? participantWhoCalledBasta.nickname : 'Alguien';
         startBastaCountdown(newRoomState.current_round_basta_called_at);
       } else if (amICaller) {
-        console.log("  DECISIÓN DEL WATCHER: Yo soy el caller. No inicio conteo para mí (mis campos ya deberían estar bloqueados por handlePlayerSaysBasta).");
+        console.log("  DECISIÓN DEL WATCHER (BASTA): Yo soy el caller.");
       } else if (gameIsOverForPlayer.value) {
-        // No soy el caller, pero mi juego ya terminó (quizás el conteo terminó para mí)
-        console.log("  DECISIÓN DEL WATCHER: No soy el caller, PERO mi juego ya terminó. No inicio conteo.");
+        console.log("  DECISIÓN DEL WATCHER (BASTA): No soy caller, PERO mi juego ya terminó para esta ronda.");
       }
-    } else {
-      // No hay current_round_basta_caller_id, podría ser inicio de ronda normal o reseteo para siguiente ronda.
-      console.log("  El estado es 'in_progress' pero no hay información de quién cantó BASTA (o es nueva ronda). Limpiando conteo.");
-      clearBastaCountdown();
-      // Si es una nueva ronda (ej. newRoomState.current_round_number > oldRoomState?.current_round_number),
-      // aquí es donde resetearías gameIsOverForPlayer.value = false; y los 'answers.value'.
-      // Esta lógica la implementaremos cuando hagamos "Siguiente Ronda".
+    } else if (!isNewRoundDetected) { 
+      // Si es 'in_progress', no hay BASTA caller, Y NO es el inicio de una nueva ronda (isNewRoundDetected fue false).
+      // Este es el estado normal de juego al inicio de una ronda antes de que alguien diga BASTA.
+      // Aseguramos que no haya conteo activo si no corresponde.
+      // console.log("  Estado es 'in_progress', no hay BASTA caller (y no es una nueva ronda explícita que acabamos de resetear). Limpiando conteo si estaba activo.");
+      if(gameIsOverForPlayer.value === false) { // Solo limpia el conteo si se supone que el jugador está activo
+         clearBastaCountdown();
+      }
     }
   } 
-  // --- Lógica para cuando el juego ya no está en progreso (ej. 'finished' o vuelve a 'waiting' inesperadamente) ---
-  else if (newRoomState.status !== 'in_progress' && oldRoomState?.status === 'in_progress') {
-    // El juego terminó o fue a otro estado que no es 'scoring' ni 'in_progress'
-    console.log(`  El estado del juego cambió de 'in_progress' a '${newRoomState.status}'. Limpiando conteo y marcando juego terminado.`);
+  else { // Otros estados
+    console.log(`  El estado del juego cambió a un estado inesperado o no manejado aquí: '${newRoomState.status}'. Limpiando conteo, marcando juego terminado para UI.`);
     clearBastaCountdown();
-    gameIsOverForPlayer.value = true; // Asegurar que los campos se bloqueen
+    gameIsOverForPlayer.value = true;
+    showingRoundResults.value = false;
   }
 }, { deep: true, immediate: true });
 
-watch(() => gameStore.currentCategories, (newCategories) => {
-  if (newCategories && newCategories.length > 0) {
-    initializeAnswers();
-  }
-}, { deep: true });
 </script>
 
 <style lang="scss" scoped>

@@ -9,6 +9,7 @@ export const useRoomStore = defineStore('room', {
     currentRoom: null,      // Objeto: Detalles de la sala actual (de GameRoomResponse)
     isLoadingRoom: false,   // Booleano: Para operaciones de carga de sala
     roomError: null,        // String: Mensajes de error de operaciones de sala
+    currentRoundResults: null,
   }),
 
   getters: {
@@ -17,23 +18,25 @@ export const useRoomStore = defineStore('room', {
     roomCode: (state) => state.currentRoom?.room_code || null,
     participants: (state) => state.currentRoom?.room_participants || [], // Usamos room_participants como en el modelo Pydantic corregido
     isCurrentUserHost: (state) => {
-        const authStore = useAuthStore();
-        console.log('RoomStore Getter: Checking isCurrentUserHost...');
-        console.log('  - state.currentRoom present?:', !!state.currentRoom);
-        if (state.currentRoom) {
-          console.log('  - state.currentRoom.host_user_id:', state.currentRoom.host_user_id);
-        }
-        console.log('  - authStore.isAuthenticated:', authStore.isAuthenticated);
-        console.log('  - authStore.userId:', authStore.userId);
-  
-        if (!state.currentRoom || !authStore.isAuthenticated || !authStore.userId) {
-          console.log('  - Pre-conditions failed. Returning false.');
-          return false;
-        }
-        const decision = state.currentRoom.host_user_id === authStore.userId;
-        console.log(`  - Comparison: ${state.currentRoom.host_user_id} === ${authStore.userId}  Result: ${decision}`);
-        return decision;
-      },
+      const authStore = useAuthStore();
+      // --- LOGS DETALLADOS PARA EL GETTER ---
+      console.log('[Getter isCurrentUserHost] Se está evaluando...');
+      console.log(`  [Getter] state.currentRoom existe?: ${!!state.currentRoom}`);
+      if (state.currentRoom) {
+        console.log(`  [Getter] state.currentRoom.host_user_id: ${state.currentRoom.host_user_id}`);
+      }
+      console.log(`  [Getter] authStore.isAuthenticated: ${authStore.isAuthenticated}`);
+      console.log(`  [Getter] authStore.userId (desde authStore.user?.id): ${authStore.user?.id}`); // Acceso directo a user.id
+      // ------------------------------------
+
+      if (!state.currentRoom || !authStore.user?.id) { // Comprobación más directa de user.id
+        console.log('  [Getter] Pre-condiciones NO cumplidas (no hay sala o no hay authStore.user.id). Devuelve: false');
+        return false;
+      }
+      const decision = state.currentRoom.host_user_id === authStore.user.id;
+      console.log(`  [Getter] Comparación: '${state.currentRoom.host_user_id}' === '${authStore.user.id}'  Resultado: ${decision}`);
+      return decision;
+    },
   },
 
   actions: {
@@ -368,6 +371,91 @@ export const useRoomStore = defineStore('room', {
         this.isLoadingRoom = false; // O el flag específico
       }
     },
+
+    async fetchRoundResults() {
+      if (!this.currentRoom?.id || !this.currentRoom?.current_round_number) {
+        console.error("RoomStore: Cannot fetch results, missing room ID or round number.");
+        this.roomError = "Información de sala o ronda incompleta.";
+        return null;
+      }
+      this.isLoadingRoom = true; // O un flag específico como isLoadingResults
+      this.roomError = null;
+      this.currentRoundResults = null; // Limpiar resultados anteriores
+      try {
+        const roomId = this.currentRoom.id;
+        const roundNumber = this.currentRoom.current_round_number;
+        console.log(`RoomStore: Fetching round results for room ${roomId}, round ${roundNumber}`);
+        
+        const response = await api.get(`/rooms/${roomId}/rounds/${roundNumber}/results`);
+        
+        this.currentRoundResults = response.data;
+        console.log("RoomStore: Round results fetched", this.currentRoundResults);
+        return this.currentRoundResults;
+      } catch (error) {
+        console.error("Error fetching round results:", error.response?.data || error.message);
+        this.roomError = error.response?.data?.detail || 'Error al cargar resultados de la ronda.';
+        // Notify.create({ type: 'negative', message: this.roomError }); // Comentado
+        return null;
+      } finally {
+        this.isLoadingRoom = false;
+      }
+    },
+
+    async goToNextRound() {
+      const authStore = useAuthStore(); // Obtenerla aquí también para logs directos
+
+      // --- LOGS DETALLADOS AL INICIO DE LA ACCIÓN ---
+      console.log('[Acción goToNextRound] Iniciando...');
+      console.log(`  [Acción] this.currentRoom existe?: ${!!this.currentRoom}`);
+      if (this.currentRoom) {
+        console.log(`  [Acción] this.currentRoom.id: ${this.currentRoom.id}`);
+        console.log(`  [Acción] this.currentRoom.host_user_id: ${this.currentRoom.host_user_id}`);
+      }
+      console.log(`  [Acción] authStore.isAuthenticated (directo): ${authStore.isAuthenticated}`);
+      console.log(`  [Acción] authStore.user?.id (directo): ${authStore.user?.id}`);
+      
+      const isHostCheckInAction = this.isCurrentUserHost; // Esto llamará al getter y sus logs
+      console.log(`  [Acción] Resultado de this.isCurrentUserHost: ${isHostCheckInAction}`);
+      // ---------------------------------------------
+      if (!this.currentRoom?.id || !this.isCurrentUserHost) {
+        this.roomError = "Solo el host puede iniciar la siguiente ronda o no estás en una sala activa.";
+        // Notify.create({ type: 'negative', message: this.roomError });
+        console.error(this.roomError);
+        return false;
+      }
+      if (this.currentRoom.status !== 'round_over_results') {
+          this.roomError = "No se puede iniciar la siguiente ronda si la ronda actual no ha mostrado sus resultados.";
+          // Notify.create({ type: 'negative', message: this.roomError });
+          console.error(this.roomError);
+          return false;
+      }
+  
+      this.isLoadingRoom = true;
+      this.roomError = null;
+      try {
+        console.log(`RoomStore: Host requesting next round for room ${this.currentRoom.id}`);
+        const response = await api.post(`/rooms/${this.currentRoom.id}/next-round`);
+        
+        // El backend actualizó la sala. Realtime (suscripción a game_rooms en GamePage.vue)
+        // se encargará de actualizar this.currentRoom con los nuevos datos (nueva letra, ronda, estado).
+        // Si el estado cambia a 'finished', el watcher en GamePage.vue también reaccionará.
+        console.log('RoomStore: Next round request successful. New room state from response (for logging):', response.data);
+        
+        // No es estrictamente necesario hacer _setRoom aquí si confías 100% en Realtime,
+        // pero puede dar una actualización optimista o ser un fallback.
+        // this._setRoom(response.data); // O mejor, _updateCurrentRoomDetails(response.data);
+  
+        return true;
+      } catch (error) {
+        console.error("Error going to next round:", error.response?.data || error.message);
+        this.roomError = error.response?.data?.detail || 'Error al iniciar la siguiente ronda.';
+        // Notify.create({ type: 'negative', message: this.roomError });
+        return false;
+      } finally {
+        this.isLoadingRoom = false;
+      }
+    },
+
   },
 
 

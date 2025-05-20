@@ -1,4 +1,3 @@
-# backend/routers/rooms_router.py
 from fastapi import APIRouter, Depends, HTTPException, status, Path
 from supabase import Client
 from typing import List, Optional
@@ -17,8 +16,12 @@ from ..models.game_models import (
     SetReadyPayload,
     RoomParticipant,
     PlayerAnswers,
+    AnswerResult,
+    ParticipantRoundResult,
+    CategoryInfo,
+    RoundResultsResponse,
 )
-from ..utils import generate_room_code
+from ..utils import generate_room_code, calculate_round_scores
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -26,6 +29,7 @@ router = APIRouter(
     tags=["Game Rooms"],
     responses={404: {"description": "Not found"}},
 )
+MAX_ROUNDS = 3
 
 def get_user_nickname(user: User) -> str:
     if user.email:
@@ -415,100 +419,104 @@ async def start_game_in_room(
 
 @router.post("/{room_id}/rounds/basta", status_code=status.HTTP_200_OK)
 async def player_says_basta(
-    player_answers_payload: PlayerAnswers, # Answers: Dict[str_category_id, Optional[str_answer]]
+    player_answers_payload: PlayerAnswers,
     room_id: UUID = Path(..., description="The ID of the game room."),
     current_user: User = Depends(get_current_active_user),
     supabase: Client = Depends(get_supabase_client)
 ):
     room_id_str = str(room_id)
     user_id_str = str(current_user.id)
-
+    
     logger.info(f"User {user_id_str} in room {room_id_str} called BASTA/submitted answers.")
-    # logger.info(f"Received answers: {player_answers_payload.answers}")
 
     try:
-        # 1. Validar sala y participante (como antes)
-        room_query = supabase.table("game_rooms").select("*, room_participants(user_id, is_ready)").eq("id", room_id_str).single().execute()
+        # 1. Validar sala y obtener detalles
+        room_query = supabase.table("game_rooms").select(
+            "*, room_participants(user_id)" # Seleccionamos user_id de participantes para el conteo
+        ).eq("id", room_id_str).single().execute()
+
         if not room_query.data:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found.")
-
+        
         room = room_query.data
-        if room["status"] != "in_progress" and room["status"] != "basta_countdown": # Permitir envío si está en conteo
-            # Si ya está en 'scoring' o 'round_over', no debería aceptar más respuestas
-            if room["status"] == "scoring" or room["status"] == "round_over" or room["status"] == "finished":
+        if room["status"] != "in_progress" and room["status"] != "basta_countdown":
+            if room["status"] in ["scoring", "round_over_results", "finished"]:
                  raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Round answers already being processed or round is over.")
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Game round is not active for submitting answers.")
 
-
         current_round = room["current_round_number"]
-        if not current_round or current_round < 1: # current_round_number debería ser >= 1
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid current round number for the room.")
+        current_letter_for_round = room.get("current_letter") # Obtener la letra actual de la sala
 
+        if not current_round or current_round < 1:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid current round number for the room.")
+        if not current_letter_for_round:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current letter for the round is not set.")
 
         participant_query = supabase.table("room_participants").select("id").eq("game_room_id", room_id_str).eq("user_id", user_id_str).single().execute()
         if not participant_query.data:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not an active participant in this room.")
-
         room_participant_id_str = str(participant_query.data["id"])
 
-        # 2. Guardar las respuestas del jugador en player_round_answers
+        # 2. Guardar las respuestas del jugador (como lo tenías)
         answers_to_insert = []
         for category_id_str, answer_text in player_answers_payload.answers.items():
-            if answer_text and answer_text.strip(): # Solo guardar respuestas no vacías (o decide tu política)
+            if answer_text and answer_text.strip():
                 answers_to_insert.append({
                     "game_room_id": room_id_str,
                     "room_participant_id": room_participant_id_str,
                     "round_number": current_round,
-                    "category_id": category_id_str, # Asume que category_id_str es un UUID válido
+                    "category_id": category_id_str,
                     "answer_text": answer_text.strip()
-                    # score_awarded, is_valid, validation_notes se llenarán después
                 })
-
+        
         if answers_to_insert:
-            logger.info(f"Inserting {len(answers_to_insert)} answers for participant {room_participant_id_str}, round {current_round}.")
+            logger.info(f"Inserting {len(answers_to_insert)} answers for P-ID {room_participant_id_str}, Round {current_round}.")
             try:
                 supabase.table("player_round_answers").insert(answers_to_insert).execute()
             except APIError as e:
                 if e.code == '23505': # Unique violation
-                    logger.warning(f"Participant {room_participant_id_str} attempted to re-submit answers for round {current_round}. Error: {e.message}")
-                else:
-                    raise e
+                    logger.warning(f"P-ID {room_participant_id_str} re-submit answers for R {current_round}. Assuming already submitted or UI issue. Error: {e.message}")
+                else: raise e
         else:
-            logger.info(f"Participant {room_participant_id_str} submitted no answers for round {current_round}.")
+            logger.info(f"P-ID {room_participant_id_str} submitted no actual answers for R {current_round}.")
+            # Aquí podrías querer insertar una fila vacía o una marca especial si un "BASTA" sin respuestas cuenta como envío
+            # para la lógica de "todos han terminado". Por ahora, se asume que un envío es tener respuestas.
 
-
-        # 3. Lógica del primer "BASTA" y conteo (como la tenías)
-        updated_room_data_for_response = room
+        # 3. Lógica del primer "BASTA"
+        updated_room_data_for_response = room # Empezar con el estado actual de la sala
         if room["current_round_basta_caller_id"] is None:
-            logger.info(f"User {user_id_str} is the FIRST to say BASTA in room {room_id_str}, round {current_round}.")
-            update_payload_for_room = {
+            logger.info(f"User {user_id_str} is FIRST BASTA in room {room_id_str}, R {current_round}.")
+            update_payload_for_room_basta_call = {
                 "current_round_basta_caller_id": user_id_str,
                 "current_round_basta_called_at": datetime.utcnow().isoformat()
             }
-            basta_update_response = supabase.table("game_rooms").update(update_payload_for_room).eq("id", room_id_str).execute()
-            if not basta_update_response.data: # Update devuelve la data actualizada
-                logger.error(f"Failed to update game_rooms with BASTA caller for room {room_id_str}")
-                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not process BASTA declaration.")
-            updated_room_data_for_response = basta_update_response.data[0]
-            logger.info(f"Room {room_id_str} updated with BASTA caller. New state will be broadcasted via Realtime.")
+
+            basta_update_response = supabase.table("game_rooms").update(update_payload_for_room_basta_call).eq("id", room_id_str).execute()
+            
+            if basta_update_response.data:
+                updated_room_data_for_response = basta_update_response.data # Actualizar con los nuevos datos de la sala
+                logger.info(f"Room {room_id_str} updated with BASTA caller. Realtime will broadcast.")
+            else:
+                logger.error(f"Failed to update game_rooms with BASTA caller for room {room_id_str}. Error: {basta_update_response.error}")
+                # No lanzar excepción aquí necesariamente, pero es un problema.
         else:
-            logger.info(f"User {user_id_str} said BASTA in room {room_id_str}, but BASTA was already called for round {current_round}.")
+            logger.info(f"User {user_id_str} said BASTA (not first) in room {room_id_str}, R {current_round}.")
 
-        # 4. Lógica para verificar su todos han terminado
-        active_participants_in_room = room.get("room_participants", []) # Esto viene de la consulta inicial a game_rooms
-        active_participant_ids = [str(p["user_id"]) for p in active_participants_in_room] # Asumiendo que user_id está en este payload
+        # --- 4. VERIFICAR SI TODOS HAN TERMINADO Y LLAMAR A CALCULAR PUNTAJES ---
+        # Obtener IDs de participantes activos de la sala (los que están en la tabla room_participants para esta sala)
+        # La consulta inicial a `room` ya trae `room_participants(user_id)` si la relación está bien configurada.
+        active_participants_data = room.get("room_participants", [])
+        if not active_participants_data: # Fallback si la relación no devolvió los user_id
+             participants_q = supabase.table("room_participants").select("user_id").eq("game_room_id", room_id_str).execute()
+             active_participants_data = participants_q.data
         
-        if not active_participant_ids: # Si la subconsulta no trajo user_ids, volver a consultarlos.
-            participants_query = supabase.table("room_participants").select("user_id").eq("game_room_id", room_id_str).execute()
-            active_participant_ids = [str(p["user_id"]) for p in participants_query.data]
+        active_participant_user_ids = {str(p["user_id"]) for p in active_participants_data}
+        total_active_participants = len(active_participant_user_ids)
 
-        logger.info(f"Active participant IDs in room {room_id_str}: {active_participant_ids}")
+        logger.info(f"Room {room_id_str}, R {current_round}: Total active participant user_ids: {total_active_participants} -> {active_participant_user_ids}")
 
-        submitted_query = supabase.table("player_round_answers").select("room_participant_id", count="exact")\
-            .eq("game_room_id", room_id_str)\
-            .eq("round_number", current_round)\
-            .execute()
-        
+        # Contar cuántos participantes distintos han enviado respuestas para esta ronda
+        # Usando la función SQL `get_distinct_submitters_for_round`
         distinct_submitters_query = supabase.rpc('get_distinct_submitters_for_round', {
             'p_room_id': room_id_str,
             'p_round_number': current_round
@@ -518,38 +526,242 @@ async def player_says_basta(
         if distinct_submitters_query.data and len(distinct_submitters_query.data) > 0:
             submitted_count = distinct_submitters_query.data[0].get('submitter_count', 0)
         
-        logger.info(f"Room {room_id_str}, Round {current_round}: Total active participants: {len(active_participant_ids)}, Participants who submitted answers: {submitted_count}")
+        logger.info(f"Room {room_id_str}, R {current_round}: Participants who submitted answers: {submitted_count}")
 
-        if len(active_participant_ids) > 0 and submitted_count >= len(active_participant_ids):
-            logger.info(f"All players in room {room_id_str} have submitted answers for round {current_round}. Changing room status to 'scoring'.")
-            status_update_resp = supabase.table("game_rooms").update({"status": "scoring"}).eq("id", room_id_str).execute() 
+        all_have_submitted = False
+        if total_active_participants > 0 and submitted_count >= total_active_participants:
+            all_have_submitted = True
+            logger.info(f"All {total_active_participants} players in room {room_id_str} submitted for R {current_round}. Changing status to 'scoring'.")
+            status_update_resp = supabase.table("game_rooms").update({"status": "scoring"}).eq("id", room_id_str).execute()
+            
             if status_update_resp.data:
                 updated_room_data_for_response = status_update_resp.data[0]
-                logger.info(f"Room {room_id_str} status successfully updated to 'scoring'. Data: {updated_room_data_for_response}")
+                logger.info(f"Room {room_id_str} status updated to 'scoring'.")
             else:
-                # Esto sería un error si esperábamos que el update devolviera el registro
-                logger.error(f"Failed to update room {room_id_str} status to 'scoring' or no data returned. Supabase response: {status_update_resp.data}, count: {status_update_resp.count}")
-                # Mantener el estado anterior de la sala para la respuesta si el update falla en devolver datos
-                # updated_room_data_for_response ya tiene el estado de la sala antes de este intento de update.
-                # O podríamos lanzar un error si consideramos crítico que el update devuelva el objeto.
-                # Por ahora, la notificación de Realtime es la más importante. Si el update en BD tuvo éxito, Realtime lo propagará.
-                pass # Continuar, Realtime debería reflejar el cambio si la BD se actualizó.
+                logger.error(f"Failed to update room {room_id_str} to 'scoring' or no data returned. Error: {status_update_resp.error}")
+                # Si falla el update a 'scoring', no proceder con el cálculo.
+                all_have_submitted = False 
+        
+        if all_have_submitted and updated_room_data_for_response['status'] == 'scoring':
+            logger.info(f"Proceeding to calculate scores for room {room_id_str}, R {current_round}, Letter: {current_letter_for_round}")
+            try:
+                await calculate_round_scores(
+                    room_id=UUID(room_id_str), 
+                    round_number=current_round, 
+                    supabase_client=supabase, # Pasar la instancia del cliente Supabase
+                    current_letter=current_letter_for_round
+                )
+                # calculate_round_scores cambia el estado a 'round_over_results'
+                # Re-fetch el estado final de la sala para la respuesta.
+                final_room_state_query = supabase.table("game_rooms").select("*").eq("id", room_id_str).single().execute()
+                if final_room_state_query.data:
+                    updated_room_data_for_response = final_room_state_query.data
+                logger.info(f"Scoring complete. Final room state for response: {updated_room_data_for_response['status']}")
+
+            except Exception as scoring_exc:
+                logger.error(f"Error during score calculation for room {room_id_str}, R {current_round}: {scoring_exc}", exc_info=True)
+                # Considerar revertir el estado a 'in_progress' o un estado de 'scoring_error'
+                supabase.table("game_rooms").update({"status": "in_progress"}).eq("id", room_id_str).execute() # Ejemplo de rollback de estado
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error calculating scores: {str(scoring_exc)}")
         
         return {
             "message": "BASTA/Answers received successfully.",
-            "round_ended_for_you": True,
-            "room_state_after_your_action": updated_room_data_for_response
+            "round_ended_for_you": True, # El jugador actual ha terminado su parte
+            "room_state_after_your_action": updated_room_data_for_response # Este es el estado de la sala que el frontend usará
         }
 
     except APIError as e:
-       logger.error(f"Supabase APIError processing BASTA for user {user_id_str} in room {room_id_str}: {e.message}", exc_info=False)
-       if e.code == '23505': # Unique violation (player already submitted answers for a category in this round)
-           # Esto puede pasar si el jugador envía BASTA dos veces rápidamente.
-           # Devolver un mensaje indicando que las respuestas ya fueron recibidas.
+        logger.error(f"Supabase APIError processing BASTA for user {user_id_str} in room {room_id_str}: {e.message}", exc_info=False)
+        if e.code == '23505':
            return {"message": "Respuestas ya recibidas para esta ronda.", "round_ended_for_you": True, "room_state_after_your_action": room}
-       raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error: {e.message or 'Unknown DB error'}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error: {e.message or 'Unknown DB error'}")
     except HTTPException as http_exc:
-       raise http_exc
+        raise http_exc
     except Exception as e:
-       logger.error(f"Unexpected error processing BASTA for user {user_id_str} in room {room_id_str}: {str(e)}", exc_info=True)
-       raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
+        logger.error(f"Unexpected error processing BASTA for user {user_id_str} in room {room_id_str}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
+    
+
+@router.get("/{room_id}/rounds/{round_number}/results", response_model=RoundResultsResponse)
+async def get_round_results(
+    room_id: UUID = Path(..., description="ID of the game room"),
+    round_number: int = Path(..., description="Round number", ge=1),
+    # current_user: User = Depends(get_current_active_user), # Opcional: ¿Se necesita estar autenticado para ver resultados?
+    supabase: Client = Depends(get_supabase_client)
+):
+    room_id_str = str(room_id)
+    logger.info(f"Fetching results for room {room_id_str}, round {round_number}")
+
+    try:
+        # 1. Obtener detalles de la sala (letra, estado, theme_id)
+        room_resp = supabase.table("game_rooms").select("current_letter, status, theme_id").eq("id", room_id_str).eq("current_round_number", round_number).single().execute()
+        if not room_resp.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room or round not found, or round number mismatch.")
+        
+        room_info = room_resp.data
+        current_letter = room_info["current_letter"]
+        room_status = room_info["status"] # Ej: 'round_over_results' o 'finished'
+
+        if room_status not in ["round_over_results", "finished", "scoring"]: # Permitir ver resultados si se está scoreando también
+             logger.warning(f"Attempt to get results for room {room_id_str} R{round_number} but status is {room_status}")
+             # Podrías lanzar un error o devolver una respuesta indicando que los resultados no están listos
+             # raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Round results are not yet available.")
+
+
+        # 2. Obtener las categorías de la temática de la sala, en orden
+        theme_id_str = str(room_info["theme_id"])
+        categories_resp = supabase.table("categories").select("id, name, order").eq("theme_id", theme_id_str).order("order", desc=False).execute()
+        if not categories_resp.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Categories for the theme not found.")
+        
+        categories_list = [CategoryInfo(**cat_data) for cat_data in categories_resp.data]
+        category_id_to_name_map = {str(cat.id): cat.name for cat in categories_list}
+
+
+        # 3. Obtener todos los participantes de la sala y sus puntajes totales actualizados
+        participants_resp = supabase.table("room_participants").select("id, user_id, nickname, score").eq("game_room_id", room_id_str).execute()
+        if not participants_resp.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participants for this room not found.")
+        
+        participants_map = {str(p["id"]): p for p in participants_resp.data} # participant_id -> {user_id, nickname, total_score}
+
+        # 4. Obtener todas las respuestas y sus puntajes para esta ronda y sala
+        answers_resp = supabase.table("player_round_answers") \
+            .select("room_participant_id, category_id, answer_text, score_awarded, is_valid, validation_notes") \
+            .eq("game_room_id", room_id_str) \
+            .eq("round_number", round_number) \
+            .execute()
+        
+        round_answers_data = answers_resp.data if answers_resp.data else []
+
+        # 5. Estructurar los resultados por participante
+        results_by_participant_dict = {} # participant_id -> ParticipantRoundResult (en construcción)
+
+        for p_id_str, p_data in participants_map.items():
+            results_by_participant_dict[p_id_str] = ParticipantRoundResult(
+                participant_id=UUID(p_id_str),
+                user_id=UUID(p_data["user_id"]),
+                nickname=p_data["nickname"],
+                round_score=0, # Se calculará sumando score_awarded
+                total_score=p_data["score"], # Este es el acumulado ya actualizado en la BD
+                answers={} # category_id_str -> AnswerResult
+            )
+        
+        for ans_row in round_answers_data:
+            p_id_str = str(ans_row["room_participant_id"])
+            cat_id_str = str(ans_row["category_id"])
+            
+            if p_id_str in results_by_participant_dict:
+                participant_result = results_by_participant_dict[p_id_str]
+                participant_result.answers[cat_id_str] = AnswerResult(
+                    text=ans_row["answer_text"],
+                    score=ans_row["score_awarded"],
+                    is_valid=ans_row["is_valid"],
+                    notes=ans_row["validation_notes"]
+                )
+                participant_result.round_score += ans_row["score_awarded"]
+            else:
+                logger.warning(f"Found answer for unknown participant {p_id_str} in round answers. Skipping.")
+        
+        # Convertir el dict a lista para la respuesta
+        final_results_list = list(results_by_participant_dict.values())
+        
+        return RoundResultsResponse(
+            room_id=UUID(room_id_str),
+            round_number=round_number,
+            current_letter=current_letter,
+            categories=categories_list,
+            results_by_participant=final_results_list,
+            room_status=room_status
+        )
+
+    except APIError as e:
+        logger.error(f"Supabase APIError fetching results for room {room_id_str} R{round_number}: {e.message}", exc_info=False)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error: {e.message}")
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Unexpected error fetching results for room {room_id_str} R{round_number}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
+    
+
+@router.post("/{room_id}/next-round", response_model=GameRoomResponse, status_code=status.HTTP_200_OK)
+async def next_round_in_room(
+    room_id: UUID = Path(..., description="The ID of the game room."),
+    current_user: User = Depends(get_current_active_user),
+    supabase: Client = Depends(get_supabase_client)
+):
+    room_id_str = str(room_id)
+    user_id_str = str(current_user.id)
+    logger.info(f"User {user_id_str} (host) attempting to start next round in room {room_id_str}")
+
+    try:
+        # 1. Obtener detalles de la sala
+        room_query = supabase.table("game_rooms").select("*").eq("id", room_id_str).single().execute()
+        if not room_query.data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Room not found.")
+        
+        room = room_query.data
+
+        # 2. Validaciones
+        if str(room["host_user_id"]) != user_id_str:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the host can start the next round.")
+        
+        if room["status"] != "round_over_results":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot start next round: current round results not yet finalized or game is over.")
+
+        # 3. Verificar si el juego ha terminado (por número de rondas)
+        current_round = room["current_round_number"]
+        new_round_number = current_round + 1
+
+        if new_round_number > MAX_ROUNDS:
+            logger.info(f"Game in room {room_id_str} has finished after {current_round} rounds (max: {MAX_ROUNDS}). Setting status to 'finished'.")
+            final_state_update = supabase.table("game_rooms").update({"status": "finished"}).eq("id", room_id_str).select().single().execute()
+            if not final_state_update.data:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update room status to 'finished'.")
+            
+            # Para la respuesta, obtener también los participantes para Pydantic
+            final_room_data_with_participants = supabase.table("game_rooms").select("*, room_participants(*)").eq("id", room_id_str).single().execute()
+            return GameRoomResponse(**final_room_data_with_participants.data)
+
+
+        # 4. Si no ha terminado, preparar para la siguiente ronda
+        # Generar nueva letra
+        import random
+        import string
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" # O tu alfabeto preferido
+        new_letter = random.choice(alphabet)
+        
+        update_payload = {
+            "status": "in_progress", # Vuelve a 'in_progress' para la nueva ronda
+            "current_letter": new_letter,
+            "current_round_number": new_round_number,
+            "current_round_basta_caller_id": None, # Resetear para la nueva ronda
+            "current_round_basta_called_at": None  # Resetear para la nueva ronda
+        }
+        logger.info(f"Starting next round ({new_round_number}) in room {room_id_str} with letter '{new_letter}'. Payload: {update_payload}")
+        
+        next_round_update_response = supabase.table("game_rooms").update(update_payload).eq("id", room_id_str).execute()
+
+        if not next_round_update_response.data:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update room for the next round.")
+
+        # (Opcional) Resetear 'is_ready' de los participantes si quieres que vuelvan a confirmar
+        # supabase.table("room_participants").update({"is_ready": False}).eq("game_room_id", room_id_str).execute()
+        # Esto dispararía Realtime para room_participants. Si lo haces, el lobby podría necesitar mostrar el estado 'listo' de nuevo.
+        # Por ahora, para BASTA, usualmente se pasa directo a la siguiente ronda sin re-confirmar "listo".
+
+        logger.info(f"Next round ({new_round_number}) started successfully in room {room_id_str}.")
+
+        # Devolver el estado actualizado de la sala
+        final_room_data_with_participants_next_round = supabase.table("game_rooms").select("*, room_participants(*)").eq("id", room_id_str).single().execute()
+        return GameRoomResponse(**final_room_data_with_participants_next_round.data)
+
+    except APIError as e:
+        logger.error(f"Supabase APIError starting next round for room {room_id_str}: {e.message}", exc_info=False)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database error: {e.message}")
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Unexpected error starting next round for room {room_id_str}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")

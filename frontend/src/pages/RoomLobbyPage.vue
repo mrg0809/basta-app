@@ -24,7 +24,7 @@
             <q-card-section>
               <div class="row items-center q-mb-md">
                 <div class="text-subtitle1">Código de Sala:</div>
-                <q-chip outline color="secondary" text-color="white" class="q-ml-sm cursor-pointer" @click="copyRoomCode">
+                <q-chip outline color="secondary" text-color="white" class="q-ml-sm cursor-pointer" @click.capture="copyRoomCode">
                   {{ roomStore.currentRoom.room_code }}
                   <q-tooltip>Copiar código</q-tooltip>
                 </q-chip>
@@ -337,23 +337,39 @@
   }, { deep: true }); // deep: true por si currentRoom es un objeto complejo y sus propiedades internas cambian
   
   const copyRoomCode = () => {
-    if (roomStore.currentRoom?.room_code) {
-      copyToClipboard(roomStore.currentRoom.room_code) // <--- Aquí se usa copyToClipboard
+    const codeToCopy = roomStore.currentRoom?.room_code; // Obtener el código
+
+    // --- Log para depuración ---
+    console.log('Intentando copiar el código de sala:', codeToCopy);
+    console.log('Tipo de dato de codeToCopy:', typeof codeToCopy);
+    // ---------------------------
+
+    if (codeToCopy && typeof codeToCopy === 'string' && codeToCopy.trim() !== '') { // Asegurarse de que sea un string no vacío
+      copyToClipboard(codeToCopy)
         .then(() => {
           $q.notify({
             message: '¡Código de sala copiado!',
             color: 'positive',
             icon: 'content_copy',
-            position: 'top'
+            position: 'top',
+            timeout: 1500 // Un timeout corto para la notificación
           });
         })
-        .catch(() => {
+        .catch((err) => { // <--- Captura el error específico
+          console.error('Error al usar copyToClipboard:', err); // <--- Loguea el error
           $q.notify({
-            message: 'Error al copiar el código',
+            message: 'Error al copiar el código. Revisa la consola.',
             color: 'negative',
             icon: 'error_outline'
           });
         });
+    } else {
+      console.warn('No se pudo copiar: room_code no es válido o está vacío.', codeToCopy);
+      $q.notify({
+        message: 'No hay un código de sala válido para copiar.',
+        color: 'warning',
+        icon: 'warning_amber'
+      });
     }
   };
   

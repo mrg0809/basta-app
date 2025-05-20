@@ -91,3 +91,31 @@ class SetReadyPayload(BaseModel):
 
 class PlayerAnswers(BaseModel):
     answers: Dict[str, Optional[str]]
+
+# --- Result Models ---
+class AnswerResult(BaseModel):
+    text: Optional[str] = None
+    score: int
+    is_valid: Optional[bool] = None # Podrías querer siempre enviarlo
+    notes: Optional[str] = None
+
+class ParticipantRoundResult(BaseModel):
+    participant_id: UUID # ID de la tabla room_participants
+    user_id: UUID
+    nickname: str
+    round_score: int
+    total_score: int # Puntaje acumulado actualizado en room_participants
+    answers: Dict[str, AnswerResult] # Clave es category_id (como string UUID)
+
+class CategoryInfo(BaseModel):
+    id: UUID
+    name: str
+    order: Optional[int] = None
+
+class RoundResultsResponse(BaseModel):
+    room_id: UUID
+    round_number: int
+    current_letter: str
+    categories: List[CategoryInfo] # Lista de categorías en orden
+    results_by_participant: List[ParticipantRoundResult]
+    room_status: str
